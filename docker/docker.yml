@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  educational-rag:
+    build: .
+    container_name: educational-rag
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./ebooks_library:/app/ebooks_library
+      - ./processed_data:/app/processed_data
+      - ./qdrant_db:/app/qdrant_db
+      - ./models:/app/models
+    environment:
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - TENANT_ID=${TENANT_ID}
+      - CLIENT_ID=${CLIENT_ID}
+      - CLIENT_SECRET=${CLIENT_SECRET}
+    restart: unless-stopped
+
+    

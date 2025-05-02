@@ -1,0 +1,23 @@
+langchain
+langchain-community
+langchain-core
+langchain-groq
+langchain-qdrant
+qdrant-client
+pymupdf
+sentence-transformers
+fastapi
+uvicorn
+pydantic
+# flask-cors
+gradio
+requests
+transformers
+python-dotenv
+huggingface-hub
+numpy
+torch
+aiofiles
+msal
+markdown
+python 3.11

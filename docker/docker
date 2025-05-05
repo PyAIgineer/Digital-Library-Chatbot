@@ -22,7 +22,7 @@ COPY . .
 RUN mkdir -p ebooks_library processed_data qdrant_db uploads static models
 
 # Expose the port the app runs on
-EXPOSE 8000
+EXPOSE 7860
 
 # Run the application
 CMD ["python", "main.py"]

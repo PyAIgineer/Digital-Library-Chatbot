@@ -2,19 +2,21 @@ version: '3.8'
 
 services:
   educational-app:
-    build: .
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
     container_name: educational-app
     ports:
       - "8000:8000"  # FastAPI backend
       - "7860:7860"  # Gradio UI
     volumes:
-      - ./ebooks_library:/app/ebooks_library
-      - ./processed_data:/app/processed_data
-      - ./qdrant_db:/app/qdrant_db
-      - ./uploads:/app/uploads
-      - ./models:/app/models
+      - ../ebooks_library:/app/ebooks_library
+      - ../processed_data:/app/processed_data
+      - ../qdrant_db:/app/qdrant_db
+      - ../uploads:/app/uploads
+      - ../src:/app/src
     env_file:
-      - .env
+      - ../.env
     environment:
       - API_BASE_URL=http://localhost:8000
     restart: unless-stopped
@@ -39,4 +41,3 @@ volumes:
   processed_data:
   qdrant_db:
   uploads:
-  models:

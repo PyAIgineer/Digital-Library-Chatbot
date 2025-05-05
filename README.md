@@ -1,163 +1,235 @@
-# Digital Library Chatbot for Students
+# Digital Library Chatbot
 
-A sophisticated digital library assistant that helps students in their studies by providing intelligent access to educational content through natural language conversations.
+An intelligent chatbot system that helps users navigate, search, and interact with educational books in a digital library. The system processes PDF documents and enables natural language conversations about their content.
 
-## 🌟 Overview
+## Features
 
-This project provides a comprehensive digital library chatbot designed specifically to support students in their academic activities. The system uses advanced Natural Language Processing (NLP) techniques to understand educational content from PDF textbooks, allowing students to have natural conversations about their study materials, find connections between topics, generate summaries, and get answers to specific questions - all in a conversational interface.
+- **PDF Library**: Upload and process educational books and documents
+- **Intelligent Chat**: Have natural conversations about book content
+- **Semantic Search**: Quickly find specific information across your digital library
+- **Book Summaries**: Generate concise summaries of entire books or individual chapters
+- **Topic Exploration**: Discover connections between concepts across different books
+- **Reading Recommendations**: Get personalized reading suggestions
+- **Visual Exploration**: Navigate book structure through a user-friendly interface
 
-Key features:
-- Study assistance through natural language conversations about textbook content
-- Helps students find information across their textbooks without manual searching
-- Generates concise summaries of chapters and books to aid in exam preparation
-- Identifies connections between topics across different courses and textbooks
-- Provides accurate answers with citations to textbook sources
-- Supports multiple interfaces (web API and user-friendly interface) for flexibility
+## System Overview
 
-## 📋 Requirements
+The Digital Library Chatbot combines several technologies:
 
-- Python 3.9+
-- PyMuPDF (for PDF processing)
-- Sentence Transformers (for semantic understanding)
-- LangChain (for LLM orchestration)
-- Qdrant (vector database for efficient information retrieval)
-- Groq API (for fast and affordable LLM access)
-- FastAPI/Uvicorn (for web API implementation)
-- Gradio (for student-friendly user interface)
+- **LLM Integration**: Leverages Groq's LLM for natural language understanding and generation
+- **Vector Search**: Uses embeddings to find semantically relevant content
+- **Document Processing**: Extracts structure and content from educational PDFs
+- **Interactive UI**: Provides a conversational interface for library exploration
 
-## 🚀 Getting Started
+## Prerequisites
 
-### Installation
+- Python 3.10+
+- Docker and Docker Compose (for containerized deployment)
+- Groq API key (or other supported LLM provider)
+- 8GB+ RAM recommended for PDF processing
 
-1. Clone the repository
-2. Install dependencies:
+## Installation
+
+### Using Docker (Recommended)
+
+1. Clone this repository:
+   ```bash
+   git clone https://github.com/yourusername/digital-library-chatbot.git
+   cd digital-library-chatbot
+   ```
+
+2. Create and configure your environment file:
+   ```bash
+   cp .env.example .env
+   # Edit .env with your API keys and settings
+   ```
+
+3. Run the start script to set up and launch the application:
+   ```bash
+   chmod +x start.sh
+   ./start.sh
+   ```
+
+4. Access the chatbot interface at http://localhost:7860
+
+### Manual Installation
+
+1. Clone the repository and create a virtual environment:
+   ```bash
+   git clone https://github.com/yourusername/digital-library-chatbot.git
+   cd digital-library-chatbot
+   python -m venv venv
+   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   ```
+
+2. Install the dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+3. Configure environment variables:
+   ```bash
+   cp .env.example .env
+   # Edit .env with your API keys and settings
+   ```
+
+4. Create required directories:
+   ```bash
+   mkdir -p ebooks_library processed_data qdrant_db uploads src/static
+   ```
+
+5. Run the application:
+   ```bash
+   python src/main.py
+   ```
+
+6. Access the chatbot interface at http://localhost:7860
+
+## User Guide
+
+### Adding Books to Your Library
+
+1. Access the chatbot interface and click on "Refresh Book List" to see your current library
+2. Upload new PDFs using the upload function in the interface
+3. The system will automatically process the books and make them available for chat
+
+### Chatting with Your Books
+
+1. Select a book from your library using the dropdown menu
+2. Type your questions or queries in the chat box
+3. The chatbot will respond with relevant information and citations to specific pages
+
+### Example Queries
+
+- "What are the main themes of this book?"
+- "Summarize Chapter 3 for me"
+- "Explain the concept of [specific topic] from this book"
+- "How does this book approach [specific subject]?"
+- "Find information about [specific topic] across all my books"
+- "What does the author say about [specific topic]?"
+- "Compare how different books in my library discuss [topic]"
+
+### Getting Book Summaries
+
+1. Select the book you want to learn about
+2. Click "Get Book Summary" to generate a comprehensive overview
+
+## API Reference
+
+The system provides a RESTful API with the following endpoints:
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/initialize` | POST | Initialize the system |
+| `/api/upload_pdf` | POST | Upload a PDF file to the library |
+| `/api/books` | GET | List all available books |
+| `/api/search` | POST | Search for information |
+| `/api/chat` | POST | Chat with books in the library |
+| `/api/summary` | POST | Generate book or chapter summary |
+| `/api/connections` | POST | Find connections between topics |
+| `/api/book_structure/{book_title}` | GET | Get document structure (TOC) |
+| `/api/reading_suggestions` | POST | Get reading suggestions |
+| `/api/status` | GET | Get processing status |
+| `/api/reset` | POST | Reset system |
+| `/health` | GET | Health check endpoint |
+
+## Project Structure
+
+```
+digital-library-chatbot/
+├── .env                        # Environment variables
+├── .env.example                # Example environment file
+├── .gitignore                  # Git ignore file
+├── README.md                   # Project documentation
+├── requirements.txt            # Python dependencies
+├                 # Helper script for starting the app
+│
+├── docker/                     # Docker configuration files
+│   ├── .dockerignore           # Docker ignore file
+│   ├── docker-compose.yml      # Docker Compose configuration
+│   ├── Dockerfile              # Docker build configuration
+│   └── Dockerfile.multistage   # Optimized multi-stage Docker build
+│   |── start.sh   
+|
+├── src/                        # Source code
+│   ├── load_data.py            # PDF processing and data loading
+│   ├── llm_interface.py        # LLM interaction functionality
+│   ├── main.py                 # FastAPI application and endpoints
+│   ├── response_format.py      # Output formatting utilities
+│   ├── retrieval.py            # Vector search and content retrieval
+│   ├── retriever_utils.py      # Helper utilities for retrieval
+│   ├── standalone.py           # Gradio UI implementation
+│   ├── vector_db.py            # Vector database integration
+│   └── static/                 # Static files for the web interface
+│
+├── ebooks_library/             # Storage for PDF files
+├── processed_data/             # Processed document data
+├── qdrant_db/                  # Vector database storage
+└── uploads/                    # Temporary upload storage
+```
+
+## Configuration
+
+The chatbot can be configured through environment variables in the `.env` file:
+
+- `GROQ_API_KEY`: Your Groq API key for LLM access
+- `LLM_MODEL`: Model to use (default: llama3-8b-8192)
+- `PORT`: Port for the API backend (default: 8000)
+- `UI_PORT`: Port for the chatbot UI (default: 7860)
+- `API_BASE_URL`: Base URL for API access
+- `LIBRARY_DIR`: Directory for storing PDF files
+- `PROCESSED_DIR`: Directory for storing processed data
+- `VECTOR_DB_PATH`: Path for vector database storage
+- `UPLOAD_DIR`: Directory for temporary file uploads
+- `LOG_LEVEL`: Logging level (INFO, DEBUG, etc.)
+
+## Development
+
+### Extending the Chatbot
+
+The modular architecture makes it easy to extend with new capabilities:
+
+1. Implement new processing logic in appropriate modules
+2. Add API endpoints in `src/main.py`
+3. Update the UI in `src/standalone.py` if needed
+
+### Building Custom Docker Images
+
 ```bash
-pip install -r requirements.txt
+docker build -t digital-library-chatbot:custom -f docker/Dockerfile .
+
+# Or using the optimized multi-stage build:
+docker build -t digital-library-chatbot:optimized -f docker/Dockerfile.multistage .
 ```
-3. Create a `.env` file with your API keys:
-```
-GROQ_API_KEY=your_groq_api_key
-```
 
-### Project Structure
+## Troubleshooting
 
-- `main.py` - FastAPI server for the web API
-- `standalone.py` - Gradio interface for direct interaction
-- `load_data.py` - PDF processing and data extraction
-- `llm_interface.py` - Interface to LLM models for text generation
-- `retrieval.py` - Advanced retrieval system for document search
-- `retriever_utils.py` - Utilities for reranking search results
-- `vector_db.py` - Vector database setup and management
-- `response_format.py` - Output formatting utilities
+### Common Issues
 
-### Usage
+- **Connection Error**: Ensure all services are running with `docker-compose -f docker/docker-compose.yml ps`
+- **PDF Processing Error**: Check if the PDF is password-protected or corrupted
+- **Memory Issues**: For large PDFs, increase the container memory limit in docker-compose.yml
+- **API Key Issues**: Verify your Groq API key is correctly set in the .env file
 
-#### Option 1: Web Interface for Students
+### Logs
 
-The simplest way to use the digital library chatbot:
+To view application logs:
+
 ```bash
-python standalone.py
+# Docker deployment
+docker-compose -f docker/docker-compose.yml logs -f
+
+# Manual deployment
+tail -f app.log
 ```
 
-This starts a user-friendly interface at http://localhost:7860 where students can:
-1. Upload their textbooks and study materials
-2. Choose which book to study from their digital library
-3. Chat naturally with the system about the content
-4. Generate quick summaries for exam preparation
-5. Ask questions and get answers with proper citations
-
-#### Option 2: API Server for Institutional Integration
-
-For educational institutions wanting to integrate with existing systems:
-```bash
-python main.py
-```
-
-This starts an API server on http://localhost:7860 that can:
-1. Be integrated with learning management systems
-2. Connect to existing digital library infrastructure
-3. Support custom institutional applications
-4. Enable programmatic uploads of department-approved textbooks
-5. Allow tracking of usage analytics for educational insights
-
-## 📘 Technical Architecture
-
-### PDF Processing (`load_data.py`)
-Behind the scenes, this component:
-- Intelligently extracts text and structure from your textbooks
-- Identifies tables, diagrams, and educational content blocks
-- Maintains chapter and section organization for proper context
-- Breaks content into meaningful chunks while preserving semantic relationships
-
-### Smart Retrieval (`retrieval.py`)
-The brain of the study assistant that:
-- Understands what information you're looking for, even if you don't use exact keywords
-- Finds the most relevant passages across all your uploaded textbooks
-- Ensures diverse information when needed for comprehensive understanding
-- Discovers connections between topics that might not be obvious
-
-### Conversation Engine (`llm_interface.py`)
-Enables the chatbot to:
-- Format educational content for optimal understanding
-- Identify and highlight connections between concepts
-- Ensure answers include proper citations to your textbooks
-- Rerank search results to prioritize the most helpful information
-
-### Knowledge Storage (`vector_db.py`)
-Efficiently stores and retrieves information:
-- Creates semantic representations of your textbooks
-- Enables lightning-fast retrieval of relevant content
-- Optimizes memory usage for large educational libraries
-- Ensures accurate retrieval of information
-
-## 📝 Example Use Cases
-
-### Study Assistance
-Ask questions like "What are the key principles of thermodynamics?" and get comprehensive answers with textbook citations.
-
-### Exam Preparation
-Request summaries of chapters or entire textbooks to quickly review material before tests.
-
-### Connecting Concepts
-Ask "How does photosynthesis relate to cellular respiration?" to find connections across biology topics or even between different courses.
-
-### Research Help
-Upload multiple textbooks and research papers, then have conversations to gather information for assignments.
-
-### Clarification of Difficult Concepts
-Ask for explanations of complex topics in simpler terms to enhance understanding.
-
-### Study Planning
-Get suggestions on what to read next based on your current focus and curriculum requirements.
-
-## 🔧 Customization for Educational Institutions
-
-### Course-Specific Configurations
-
-Educational institutions can customize the chatbot for specific courses:
-1. Upload course-specific textbooks and materials
-2. Modify prompts in `llm_interface.py` to align with course learning objectives
-3. Add course-specific terminology and concepts
-
-### Integration with Learning Management Systems
-
-The system can be integrated with existing LMS platforms:
-1. Use the FastAPI endpoints to connect to systems like Canvas, Moodle, or Blackboard
-2. Enable single sign-on for student authentication
-3. Track student interactions for personalized learning analytics
-
-### Supporting Different Document Types
-
-Beyond textbooks, the system can be customized to work with:
-1. Lecture notes and slides
-2. Academic papers
-3. Lab manuals and procedural documents
-4. Student-generated study materials
-
-## 🤝 Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-## 📄 License
+## License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
+
+## Acknowledgments
+
+- PyMuPDF for PDF processing capabilities
+- LangChain for the LLM integration framework
+- Qdrant for vector storage
+- FastAPI and Gradio for the backend and UI

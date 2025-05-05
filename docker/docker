@@ -1,61 +1,42 @@
-# Build stage
-FROM python:3.11-slim AS builder
+FROM python:3.11-slim
 
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV GRADIO_SERVER_NAME=0.0.0.0
+
+# Set working directory
 WORKDIR /app
 
-# Install build dependencies
+# Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     python3-dev \
     git \
     libffi-dev \
     libmupdf-dev \
+    curl \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first (for better caching)
 COPY requirements.txt .
 
-# Create venv and install dependencies
-RUN python -m venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
-RUN pip install --no-cache-dir -U pip setuptools wheel
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Runtime stage
-FROM python:3.10-slim
-
-# Copy Python environment from builder
-COPY --from=builder /opt/venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
-
-# Install runtime dependencies for PyMuPDF
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libmupdf-dev \
-    curl \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /app
+# Install Python dependencies
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY . .
 
 # Create necessary directories
-RUN mkdir -p /app/ebooks_library /app/processed_data /app/qdrant_db /app/uploads /app/static /app/models
-VOLUME ["/app/ebooks_library", "/app/processed_data", "/app/qdrant_db", "/app/uploads", "/app/models"]
+RUN mkdir -p ebooks_library processed_data qdrant_db uploads static
 
-# Expose ports for API and UI
-EXPOSE 8000 7860
+# Make start script executable
+RUN chmod +x railway-start.sh
 
-# Run as non-root user for better security
-RUN useradd -m appuser
-RUN chown -R appuser:appuser /app
-USER appuser
+# Expose port (Railway will override with $PORT)
+EXPOSE 8000
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=40s \
-  CMD curl -f http://localhost:8000/health || exit 1
-
-# Command to run the application
-CMD ["python", "main.py"]
+# Command to run
+CMD ["./railway-start.sh"]

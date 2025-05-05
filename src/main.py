@@ -34,6 +34,10 @@ from retrieval import EnhancedRetriever
 from vector_db import setup_vector_db, get_books_with_metadata, clear_vector_db
 
 from contextlib import asynccontextmanager
+from dotenv import load_dotenv
+
+# Load environment variables at the beginning of the file
+load_dotenv()
 
 # Add this context manager at the top of your main.py file
 @asynccontextmanager
@@ -92,10 +96,12 @@ async def lifespan(app: FastAPI):
 
 # Initialize FastAPI app
 app = FastAPI(
-    title="Educational Content Analysis API",
+    title="Digital Library Chatbot",
     description="API for processing, analyzing, and retrieving educational content using LLMs",
     version="1.0.0",
-    lifespan=lifespan 
+    lifespan=lifespan,
+    # Add root_path for proxying on Railway if needed
+    root_path=os.environ.get("ROOT_PATH", "")
 )
 
 # Add CORS middleware with specific origin for Gradio UI
@@ -299,17 +305,28 @@ def start_ui_process():
     try:
         ui_script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "standalone.py")
         env = os.environ.copy()
-        env["API_BASE_URL"] = "http://127.0.0.1:8000"  
+        # Make sure we use 127.0.0.1 consistently 
+         # For Railway deployment, set environment variables
+        if os.environ.get("RAILWAY_STATIC_URL"):
+            # If on Railway, the API is at the same URL
+            env["API_BASE_URL"] = os.environ.get("RAILWAY_STATIC_URL")
+        else:
+            # For local development
+            env["API_BASE_URL"] = "http://localhost:8000"
+            
+        # Make sure Gradio binds to all interfaces
+        env["GRADIO_SERVER_NAME"] = "0.0.0.0"
         
-        # Start the UI process WITHOUT redirecting output to capture errors directly
+        # Start the UI process
         print(f"Starting UI process from: {ui_script_path}")
         global_state["ui_process"] = subprocess.Popen(
             [sys.executable, ui_script_path],
-            env=env
-            # Removed stdout and stderr redirection to see all output
+            env=env,
+            # Don't redirect output so we can see errors directly
         )
         
         print(f"UI process started with PID: {global_state['ui_process'].pid}")
+        print(f"Access the Gradio UI at: http://0.0.0.0:7860 or through Railway proxy")
             
     except Exception as e:
         print(f"Error starting UI process: {e}")
@@ -623,89 +640,8 @@ async def monitor_ui_process():
             if line:
                 print(f"UI Error> {line.decode('utf-8').strip()}")
 
-
-# Function to start the UI process
-def start_ui_process():
-    try:
-        ui_script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "standalone.py")
-        env = os.environ.copy()
-        # Make sure we use 127.0.0.1 consistently 
-        env["API_BASE_URL"] = "http://127.0.0.1:8000"
-        
-        # Start the UI process
-        print(f"Starting UI process from: {ui_script_path}")
-        global_state["ui_process"] = subprocess.Popen(
-            [sys.executable, ui_script_path],
-            env=env,
-            # Don't redirect output so we can see errors directly
-        )
-        
-        print(f"UI process started with PID: {global_state['ui_process'].pid}")
-        print(f"Access the Gradio UI at: http://127.0.0.1:7860")
-            
-    except Exception as e:
-        print(f"Error starting UI process: {e}")
-
-# Function to monitor UI process output
-async def monitor_ui_process():
-    if global_state["ui_process"]:
-        # Non-blocking read from subprocess stdout and stderr
-        for line in iter(global_state["ui_process"].stdout.readline, b''):
-            if line:
-                print(f"UI> {line.decode('utf-8').strip()}")
-        
-        for line in iter(global_state["ui_process"].stderr.readline, b''):
-            if line:
-                print(f"UI Error> {line.decode('utf-8').strip()}")
-
 # Serve static files
 app.mount("/static", StaticFiles(directory="static"), name="static")
-
-# Startup event to initialize the watcher and UI
-# Add this near the imports section in main.py
-from dotenv import load_dotenv
-
-# Load environment variables at the beginning of the file
-load_dotenv()
-
-# startup_event function 
-# @app.on_event("startup")
-# async def startup_event():
-#     # Start the library watcher thread
-#     start_library_watcher()
-    
-#     # Auto-initialize the system if environment variables are set
-#     if os.environ.get("GROQ_API_KEY"):
-#         try:
-#             print("Auto-initializing system...")
-            
-#             # Initialize the system with environment variables
-#             await initialize_system()
-            
-#             print("System auto-initialized successfully")
-#         except Exception as e:
-#             print(f"Auto-initialization failed: {e}")
-#     else:
-#         print("No GROQ_API_KEY found in environment variables. Auto-initialization skipped.")
-    
-#     # Start the UI process
-#     start_ui_process()
-
-# # Shutdown event to clean up processes
-# @app.on_event("shutdown")
-# async def shutdown_event():
-#     # Terminate UI process if running
-#     if global_state["ui_process"]:
-#         print(f"Shutting down UI process (PID: {global_state['ui_process'].pid})")
-#         try:
-#             global_state["ui_process"].terminate()
-#             global_state["ui_process"].wait(timeout=5)
-#         except:
-#             # Force kill if termination doesn't work
-#             if sys.platform != "win32":  # Not supported on Windows
-#                 os.kill(global_state["ui_process"].pid, signal.SIGKILL)
-#             else:
-#                 os.system(f"taskkill /F /PID {global_state['ui_process'].pid}")
 
 # Add this function near your other API endpoints in main.py
 @app.get("/")
@@ -733,7 +669,25 @@ async def root():
     }
 
 # Entry point for running the application
+# if __name__ == "__main__":
+#     # Run with reload enabled as requested
+#     import uvicorn
+#     print("Starting FastAPI server with hot reload on 127.0.0.1:8000...")
+#     uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True, log_level="debug")
+
 if __name__ == "__main__":
-     # Run without reload, and with clearer host binding
-    print("Starting FastAPI server on 127.0.0.1:8000...")
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=False, log_level="debug")
+    import uvicorn
+    import os
+    
+    # Get port from environment variable or default to 8000
+    port = int(os.environ.get("PORT", 8000))
+    
+    # For Railway, we need to bind to 0.0.0.0
+    host = "0.0.0.0"
+    
+    print(f"Starting FastAPI server on {host}:{port}...")
+    
+    # Disable reload in production (on Railway)
+    reload_mode = False if os.environ.get("RAILWAY_STATIC_URL") else True
+    
+    uvicorn.run("main:app", host=host, port=port, reload=reload_mode, log_level="info")

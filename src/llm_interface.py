@@ -128,84 +128,83 @@ class TopicConnectionFinder:
 def build_chatbot(retrieval_system, llm, use_reranker=True):
     """Build an enhanced RAG chatbot using the retrieval system with topic connections."""
     
-    # Determine if we're receiving a direct retriever or a dictionary
-    if isinstance(retrieval_system, dict) and "base_retriever" in retrieval_system:
+    # Properly handle retriever system type without attribute errors
+    base_retriever = None
+    
+    if hasattr(retrieval_system, 'get_relevant_documents'):
+        # It's already a BaseRetriever compatible object
+        base_retriever = retrieval_system
+    elif isinstance(retrieval_system, dict) and "base_retriever" in retrieval_system:
+        # It's a dict with base_retriever
         base_retriever = retrieval_system["base_retriever"]
     else:
-        # Assume retrieval_system is the retriever itself
+        # Assume it's the EnhancedRetriever from retrieval.py
         base_retriever = retrieval_system
     
-    # Initialize the topic connection finder
-    connection_finder = TopicConnectionFinder(llm, base_retriever)
-
-    # Create conversation memory
-    memory = ConversationBufferMemory(
-        memory_key="chat_history",
-        return_messages=True,
-        output_key="answer"
-    )
+    # Initialize topic connection finder
+    connection_finder = None
+    try:
+        from llm_interface import TopicConnectionFinder
+        connection_finder = TopicConnectionFinder(llm, base_retriever)
+    except Exception as e:
+        print(f"Warning: Failed to initialize TopicConnectionFinder: {str(e)}")
     
-    # Create our enhanced retriever
-    enhanced_retriever = RerankedRetriever(
-        base_retriever=base_retriever, 
-        llm=llm, 
-        use_reranker=use_reranker
-    )
-    
-    # Define a prompt template for extracting connections
-    connection_prompt = PromptTemplate.from_template(
-        """Analyze the following content and identify meaningful connections between topics:
-        
-        CONTENT:
-        {context}
-        
-        QUESTION:
-        {question}
-        
-        Identify key topics and their relationships:"""
-    )
-    
-    # Define the main QA prompt
-    qa_prompt = PromptTemplate.from_template(
-        """You are an educational assistant specializing in textbooks and curriculum materials.
-        Use the following context and connections to answer the question.
-        
-        CONTEXT:
-        {context}
-        
-        TOPIC CONNECTIONS:
-        {connections}
-        
-        CHAT HISTORY:
-        {chat_history}
-        
-        QUESTION:
-        {question}
-        
-        Provide a comprehensive answer that:
-        1. Directly addresses the question
-        2. Highlights relevant connections between concepts and chapters
-        3. Explains how different topics relate to each other
-        4. Shows the progression of ideas across the educational material
-        
-        COMPREHENSIVE ANSWER:"""
-    )
-    
-    # Create a custom function for handling the conversation
+    # Create a function to handle queries - avoids issues with BaseRetriever
     def process_query(query_dict):
+        """Process a user query and return a response with sources."""
         question = query_dict.get("question", "")
         chat_history = query_dict.get("chat_history", [])
         
-        # Get relevant documents
-        docs = enhanced_retriever.invoke(question)
+        # Retrieve relevant documents while handling potential retriever errors
+        docs = []
+        try:
+            # Attempt to get documents using the most appropriate method
+            if hasattr(base_retriever, 'advanced_retrieval'):
+                # For EnhancedRetriever
+                results = base_retriever.advanced_retrieval(question, top_k=5)
+                docs = [Document(
+                    page_content=r["content"],
+                    metadata=r["metadata"]
+                ) for r in results]
+            elif hasattr(base_retriever, 'get_relevant_documents'):
+                # Standard BaseRetriever interface
+                docs = base_retriever.get_relevant_documents(question)
+            elif hasattr(base_retriever, 'semantic_search'):
+                # Fallback to semantic_search
+                results = base_retriever.semantic_search(question)
+                docs = [Document(
+                    page_content=r["content"],
+                    metadata=r["metadata"]
+                ) for r in results]
+        except Exception as primary_error:
+            print(f"Primary retrieval method failed: {primary_error}")
+            
+            # Handle common BaseRetriever errors with more specific fallbacks
+            try:
+                # Try with explicit run_manager - addresses the issue in the links
+                if hasattr(base_retriever, '_get_relevant_documents'):
+                    from langchain.callbacks.manager import CallbackManagerForRetrieverRun
+                    callback_manager = CallbackManagerForRetrieverRun([])
+                    docs = base_retriever._get_relevant_documents(question, run_manager=callback_manager)
+                    print("Successfully retrieved documents using _get_relevant_documents with callback manager")
+            except Exception as secondary_error:
+                print(f"Fallback retrieval method also failed: {secondary_error}")
+                # Last resort
+                docs = []
         
-        # Extract document content
-        context = "\n\n".join([doc.page_content for doc in docs])
+        # Extract context
+        context = "\n\n".join([doc.page_content for doc in docs]) if docs else "No relevant information found."
         
-        # Find connections using connection finder
-        connections = connection_finder.find_connections(question, docs)
+        # Find topic connections if available
+        connections = ""
+        if connection_finder and docs:
+            try:
+                connections = connection_finder.find_connections(question, docs)
+            except Exception as e:
+                print(f"Failed to find connections: {e}")
+                connections = "Unable to analyze connections."
         
-        # Format chat history if present
+        # Format chat history
         formatted_history = ""
         if chat_history:
             history_items = []
@@ -217,15 +216,31 @@ def build_chatbot(retrieval_system, llm, use_reranker=True):
             formatted_history = "\n".join(history_items)
         
         # Create input for the prompt
-        prompt_input = {
-            "context": context,
-            "connections": connections,
-            "chat_history": formatted_history,
-            "question": question
-        }
+        prompt_input = f"""You are an educational assistant specializing in textbooks and curriculum materials.
+        Use the following context and connections to answer the question.
+        
+        CONTEXT:
+        {context}
+        
+        TOPIC CONNECTIONS:
+        {connections}
+        
+        CHAT HISTORY:
+        {formatted_history}
+        
+        QUESTION:
+        {question}
+        
+        Provide a comprehensive answer that:
+        1. Directly addresses the question
+        2. Highlights relevant connections between concepts and chapters
+        3. Explains how different topics relate to each other
+        4. Shows the progression of ideas across the educational material
+        
+        COMPREHENSIVE ANSWER:"""
         
         # Generate the answer
-        answer = llm.invoke(qa_prompt.format(**prompt_input))
+        answer = llm.invoke(prompt_input)
         
         # Return the result in the expected format
         return {
@@ -233,7 +248,9 @@ def build_chatbot(retrieval_system, llm, use_reranker=True):
             "source_documents": docs
         }
     
+    # Return the process_query function without relying on LangChain chains
     return process_query
+
     
     # Create a function to analyze connections before answering
     def analyze_connections(inputs):
@@ -364,26 +381,25 @@ def get_chat_response_with_format(chatbot, question, llm=None):
 def generate_book_summary_direct(book_title, retrieval_system, llm, processed_data_dir="./processed_data"):
     """Generate a book summary by directly reading processed data files."""
     print(f"Generating summary for book: {book_title}")
+    
     try:
-        # Find book data in processed directory
+        # Step 1: Find book data in processed directory
         book_data = None
         book_hash = None
         
-        # Debug: Log available directories
         if os.path.exists(processed_data_dir):
             print(f"Processing directory exists. Contents: {os.listdir(processed_data_dir)}")
         else:
             print(f"WARNING: Processing directory '{processed_data_dir}' does not exist")
             return f"Processing directory not found. Please check your configuration."
         
-        # Loop through all directories in processed_data
+        # Look for exact match first
         for file_hash in os.listdir(processed_data_dir):
             metadata_path = os.path.join(processed_data_dir, file_hash, "metadata.json")
             if os.path.exists(metadata_path):
                 try:
                     with open(metadata_path, "r") as f:
                         metadata = json.load(f)
-                        print(f"Found metadata for book: {metadata.get('book_title')}")
                         if metadata.get("book_title") == book_title:
                             book_data = metadata
                             book_hash = file_hash
@@ -392,8 +408,8 @@ def generate_book_summary_direct(book_title, retrieval_system, llm, processed_da
                 except Exception as e:
                     print(f"Error reading metadata file {metadata_path}: {str(e)}")
         
+        # Try flexible matching if needed
         if not book_data:
-            # Try a more flexible matching approach
             for file_hash in os.listdir(processed_data_dir):
                 metadata_path = os.path.join(processed_data_dir, file_hash, "metadata.json")
                 if os.path.exists(metadata_path):
@@ -413,11 +429,11 @@ def generate_book_summary_direct(book_title, retrieval_system, llm, processed_da
                                 break
                     except Exception as e:
                         print(f"Error in flexible matching: {str(e)}")
-            
-            if not book_data:
-                return f"No content found for book '{book_title}'. Please check the book title."
         
-        # Load chunks
+        if not book_data:
+            return f"No content found for book '{book_title}'. Please check the book title."
+        
+        # Step 2: Load and process chunks
         chunks_path = os.path.join(processed_data_dir, book_hash, "chunks.json")
         if not os.path.exists(chunks_path):
             return f"No chunks found for book '{book_title}'."
@@ -430,28 +446,98 @@ def generate_book_summary_direct(book_title, retrieval_system, llm, processed_da
         
         print(f"Loaded {len(chunks_data)} chunks for book '{book_title}'")
         
-        # Extract content from chunks
+        # Step 3: Combine with relevant content from retrieval_system (if possible)
         contents = []
+        retriever_contents = []
+        
+        # Extract content from file chunks first
         for chunk in chunks_data:
-            if isinstance(chunk, dict) and "page_content" in chunk:
-                contents.append(chunk["page_content"])
+            if isinstance(chunk, dict):
+                content = None
+                if "page_content" in chunk:
+                    content = chunk["page_content"]
+                elif "content" in chunk:
+                    content = chunk["content"]
+                elif "text" in chunk:
+                    content = chunk["text"]
+                
+                if content:
+                    contents.append(content)
         
-        if not contents:
-            # Try alternative field names if page_content isn't found
-            for chunk in chunks_data:
-                if isinstance(chunk, dict):
-                    if "content" in chunk:
-                        contents.append(chunk["content"])
-                    elif "text" in chunk:
-                        contents.append(chunk["text"])
+        # Try to get additional content from retriever without causing errors
+        try:
+            # Check retriever type and capabilities
+            if hasattr(retrieval_system, 'advanced_retrieval'):
+                # It's likely the EnhancedRetriever
+                overview_query = f"key concepts and main themes of {book_title}"
+                results = retrieval_system.advanced_retrieval(
+                    query=overview_query,
+                    filters={"book_title": book_title},
+                    top_k=10
+                )
+                # Extract content from results
+                for result in results:
+                    retriever_contents.append(result["content"])
+            elif hasattr(retrieval_system, 'get_relevant_documents'):
+                # Standard BaseRetriever interface
+                try:
+                    overview_query = f"key concepts and main themes of {book_title}"
+                    docs = retrieval_system.get_relevant_documents(overview_query)
+                    # Filter for this book
+                    for doc in docs:
+                        if doc.metadata.get("book_title") == book_title:
+                            retriever_contents.append(doc.page_content)
+                except Exception as e:
+                    print(f"Error in get_relevant_documents: {e}")
+                    # Try with explicit callback manager as mentioned in the links
+                    try:
+                        from langchain.callbacks.manager import CallbackManagerForRetrieverRun
+                        callback_manager = CallbackManagerForRetrieverRun([])
+                        docs = retrieval_system._get_relevant_documents(
+                            f"key concepts and main themes of {book_title}", 
+                            run_manager=callback_manager
+                        )
+                        for doc in docs:
+                            if doc.metadata.get("book_title") == book_title:
+                                retriever_contents.append(doc.page_content)
+                    except Exception as e2:
+                        print(f"Fallback retrieval also failed: {e2}")
+        except Exception as e:
+            print(f"Warning: Could not use retrieval system for additional content: {e}")
+            print("Using only file-based chunks for summary.")
         
-        if not contents:
-            return f"Could not extract content from chunks for book '{book_title}'."
+        # Combine retriever contents with file contents
+        if retriever_contents:
+            print(f"Found {len(retriever_contents)} additional chunks from retrieval")
+            
+            # Prioritize retriever contents (they're likely more relevant)
+            combined_contents = []
+            combined_contents.extend(retriever_contents[:10])  # First 10 retriever results
+            
+            # Add file contents that don't overlap too much
+            seen_content_starts = set()
+            for content in contents:
+                # Create a fingerprint of the first 100 characters
+                content_start = content[:100].strip() if content else ""
+                if content_start and content_start not in seen_content_starts:
+                    seen_content_starts.add(content_start)
+                    combined_contents.append(content)
+                    
+                    # Limit to total of 20 chunks
+                    if len(combined_contents) >= 20:
+                        break
+            
+            # Use combined contents if we have enough
+            if len(combined_contents) >= 10:
+                contents = combined_contents
         
-        # Limit content to avoid token limits
-        book_content = "\n\n".join(contents[:20])  # Take first 20 chunks
+        # Limit content to avoid token limits (take the 20 first chunks)
+        book_content = "\n\n".join(contents[:20])
         
-        # Create summarization prompt
+        # Step 4: Create summarization prompt
+        from langchain.prompts import PromptTemplate
+        from langchain.schema.output_parser import StrOutputParser
+        
         summary_prompt = PromptTemplate(
             input_variables=["book_title", "book_content"],
             template="""You are an expert educational book summarizer specialized in creating comprehensive and insightful summaries.
@@ -485,6 +571,7 @@ def generate_book_summary_direct(book_title, retrieval_system, llm, processed_da
 
         return summary
     except Exception as e:
+        import traceback
         traceback.print_exc()
         return f"Error generating summary: {str(e)}"
 
@@ -677,124 +764,196 @@ def generate_book_summary(book_title, retrieval_system, llm, processed_data_dir=
 def generate_chapter_summary(book_title, chapter_header, retrieval_system, llm):
     """Generate a comprehensive summary of a specific chapter with topic connections."""
     
-    # The retriever should be passed directly, no need to extract it
-    retriever = retrieval_system
-    
-    # Create a function to search for content with manual filtering
-    def search_chapter_content(query, book_title, chapter_header=None, max_results=10):
-        try:
-            # Get raw results from vector DB
-            raw_results = retriever.semantic_search(query, top_k=max_results*2)
-            
-            # Filter results manually to only include this book and chapter
-            filtered_results = []
-            for result in raw_results:
-                # Check if it's the right book
-                if result.get("book_title") != book_title:
-                    continue
-                    
-                # If chapter header provided, check if it matches
-                if chapter_header and result.get("header") != chapter_header:
-                    continue
+    try:
+        # Step 1: Handle different retriever types safely
+        retriever = None
+        is_enhanced_retriever = False
+        
+        if hasattr(retrieval_system, 'advanced_retrieval'):
+            # It's likely the EnhancedRetriever from retrieval.py
+            retriever = retrieval_system
+            is_enhanced_retriever = True
+        elif hasattr(retrieval_system, 'get_relevant_documents'):
+            # It's a standard BaseRetriever
+            retriever = retrieval_system
+        elif isinstance(retrieval_system, dict) and "base_retriever" in retrieval_system:
+            # It's a dict with base_retriever
+            retriever = retrieval_system["base_retriever"]
+        else:
+            return f"Invalid retriever configuration. Retrieval system lacks required methods."
+        
+        # Step 2: Get chapter content with proper error handling
+        chapter_docs = []
+        book_context_docs = []
+        
+        # Try different retrieval approaches
+        if is_enhanced_retriever:
+            # Use EnhancedRetriever's capabilities
+            try:
+                # Get chapter content
+                chapter_filter = {"book_title": book_title}
+                chapter_query = f"Content from chapter '{chapter_header}' in {book_title}"
+                chapter_results = retriever.advanced_retrieval(
+                    query=chapter_query,
+                    filters=chapter_filter,
+                    top_k=8
+                )
                 
-                # Convert to Document object if needed
-                if not isinstance(result, Document):
+                # Get book context
+                context_query = f"How chapter '{chapter_header}' relates to {book_title}"
+                context_results = retriever.advanced_retrieval(
+                    query=context_query,
+                    filters=chapter_filter,
+                    top_k=5
+                )
+                
+                # Convert results to Document objects
+                for result in chapter_results:
+                    if chapter_header.lower() in result.get("header", "").lower():
+                        doc = Document(
+                            page_content=result["content"],
+                            metadata=result["metadata"]
+                        )
+                        chapter_docs.append(doc)
+                
+                for result in context_results:
                     doc = Document(
-                        page_content=result.get("content", ""),
-                        metadata=result.get("metadata", {})
+                        page_content=result["content"],
+                        metadata=result["metadata"]
                     )
-                    filtered_results.append(doc)
-                else:
-                    filtered_results.append(result)
+                    book_context_docs.append(doc)
+            except Exception as e:
+                print(f"Error using advanced_retrieval: {e}")
+        else:
+            # Standard retriever with careful error handling 
+            try:
+                # Try with standard get_relevant_documents
+                chapter_query = f"Content from chapter '{chapter_header}' in {book_title}"
+                context_query = f"How chapter '{chapter_header}' relates to {book_title}"
+                
+                # Get chapter content
+                doc_results = retriever.get_relevant_documents(chapter_query)
+                
+                # Manual filtering for chapter content
+                for doc in doc_results:
+                    if (doc.metadata.get("book_title") == book_title and
+                        chapter_header.lower() in doc.metadata.get("current_header", "").lower()):
+                        chapter_docs.append(doc)
+                
+                # Get book context
+                context_results = retriever.get_relevant_documents(context_query)
+                
+                # Filter for book context
+                for doc in context_results:
+                    if doc.metadata.get("book_title") == book_title:
+                        book_context_docs.append(doc)
+            except Exception as e:
+                print(f"Error in standard retrieval: {e}")
+                
+                # Try with explicit callback manager to avoid compatibility issues
+                try:
+                    from langchain.callbacks.manager import CallbackManagerForRetrieverRun
+                    callback_manager = CallbackManagerForRetrieverRun([])
                     
-                # Limit results
-                if len(filtered_results) >= max_results:
-                    break
+                    # Get results with callback manager
+                    if hasattr(retriever, '_get_relevant_documents'):
+                        doc_results = retriever._get_relevant_documents(
+                            f"Content from chapter '{chapter_header}' in {book_title}",
+                            run_manager=callback_manager
+                        )
+                        
+                        context_results = retriever._get_relevant_documents(
+                            f"How chapter '{chapter_header}' relates to {book_title}",
+                            run_manager=callback_manager
+                        )
+                        
+                        # Manual filtering
+                        for doc in doc_results:
+                            if (doc.metadata.get("book_title") == book_title and
+                                chapter_header.lower() in doc.metadata.get("current_header", "").lower()):
+                                chapter_docs.append(doc)
+                        
+                        for doc in context_results:
+                            if doc.metadata.get("book_title") == book_title:
+                                book_context_docs.append(doc)
+                except Exception as e2:
+                    print(f"Fallback retrieval also failed: {e2}")
+        
+        # Step 3: Check if we found content
+        if not chapter_docs:
+            return f"No content found for chapter '{chapter_header}' in book '{book_title}'."
+        
+        # Step 4: Find connections using TopicConnectionFinder
+        from llm_interface import TopicConnectionFinder
+        connection_finder = TopicConnectionFinder(llm, retriever)
+        
+        # Combine all documents for analysis
+        all_docs = chapter_docs + book_context_docs
+        
+        # Find internal connections
+        internal_connections = connection_finder.find_connections(
+            f"How do concepts connect within chapter '{chapter_header}'", 
+            chapter_docs
+        )
+        
+        # Find connections to other chapters
+        book_connections = connection_finder.find_connections(
+            f"How does chapter '{chapter_header}' connect to other chapters in {book_title}",
+            all_docs
+        )
+        
+        # Step 5: Extract chapter content for summarization
+        chapter_content = "\n\n".join([doc.page_content for doc in chapter_docs])
+        
+        # Step 6: Create summarization prompt
+        from langchain.prompts import PromptTemplate
+        from langchain.schema.output_parser import StrOutputParser
+        
+        summary_prompt = PromptTemplate(
+            input_variables=["book_title", "chapter_header", "chapter_content", "internal_connections", "book_connections"],
+            template="""You are an expert educational content summarizer. Create a comprehensive summary of the chapter "{chapter_header}" 
+            from the book "{book_title}" based on the following extracted content and connection analyses.
+
+            CHAPTER CONTENT:
+            {chapter_content}
             
-            return filtered_results
-        except Exception as e:
-            print(f"Error in chapter content search: {str(e)}")
-            return []  # Return empty list on error
-    
-    # Retrieve content from the specific chapter
-    chapter_docs = search_chapter_content(
-        f"Complete content and concepts from {chapter_header}",
-        book_title,
-        chapter_header
-    )
-    
-    # Also retrieve some book-level context to place this chapter in perspective
-    book_context_docs = search_chapter_content(
-        f"Where does the chapter '{chapter_header}' fit in the overall structure of {book_title}",
-        book_title
-    )
-    
-    # Combine all docs
-    all_docs = chapter_docs + book_context_docs
-    
-    if not chapter_docs:
-        return f"No content found for chapter '{chapter_header}' in book '{book_title}'."
-    
-    # Extract content
-    chapter_content = "\n\n".join([doc.page_content for doc in chapter_docs 
-                                 if hasattr(doc, 'page_content')])
-    
-    # Find internal topic connections within the chapter
-    from llm_interface import TopicConnectionFinder
-    connection_finder = TopicConnectionFinder(llm, retriever)
-    internal_connections = connection_finder.find_connections(
-        f"How do concepts connect within chapter '{chapter_header}'", 
-        chapter_docs
-    )
-    
-    # Find connections between this chapter and the rest of the book
-    book_connections = connection_finder.find_connections(
-        f"How does chapter '{chapter_header}' connect to other chapters in {book_title}",
-        all_docs
-    )
-    
-    # Create summarization prompt with connections
-    summary_prompt = PromptTemplate(
-        input_variables=["book_title", "chapter_header", "chapter_content", "internal_connections", "book_connections"],
-        template="""You are an expert educational content summarizer. Create a comprehensive summary of the chapter "{chapter_header}" 
-        from the book "{book_title}" based on the following extracted content and connection analyses.
+            INTERNAL TOPIC CONNECTIONS:
+            {internal_connections}
+            
+            CONNECTIONS TO OTHER CHAPTERS:
+            {book_connections}
 
-        CHAPTER CONTENT:
-        {chapter_content}
-        
-        INTERNAL TOPIC CONNECTIONS:
-        {internal_connections}
-        
-        CONNECTIONS TO OTHER CHAPTERS:
-        {book_connections}
+            Provide a comprehensive chapter summary with the following structure:
+            1. Chapter Overview - Main focus and purpose
+            2. Key Concepts - Primary ideas and principles introduced
+            3. Internal Structure - How topics within the chapter relate to each other
+            4. Position in Book - How this chapter connects to previous and upcoming chapters
+            5. Study Focus - What students should concentrate on from this chapter
+            
+            COMPREHENSIVE CHAPTER SUMMARY:"""
+        )
 
-        Provide a comprehensive chapter summary with the following structure:
-        1. Chapter Overview - Main focus and purpose
-        2. Key Concepts - Primary ideas and principles introduced
-        3. Internal Structure - How topics within the chapter relate to each other
-        4. Position in Book - How this chapter connects to previous and upcoming chapters
-        5. Study Focus - What students should concentrate on from this chapter
-        
-        COMPREHENSIVE CHAPTER SUMMARY:"""
-    )
+        # Create a summarization chain
+        summary_chain = (
+            summary_prompt 
+            | llm 
+            | StrOutputParser()
+        )
 
-    # Create a summarization chain
-    summary_chain = (
-        summary_prompt 
-        | llm 
-        | StrOutputParser()
-    )
+        # Generate summary
+        summary = summary_chain.invoke({
+            "book_title": book_title,
+            "chapter_header": chapter_header,
+            "chapter_content": chapter_content,
+            "internal_connections": internal_connections,
+            "book_connections": book_connections
+        })
 
-    # Generate summary
-    summary = summary_chain.invoke({
-        "book_title": book_title,
-        "chapter_header": chapter_header,
-        "chapter_content": chapter_content,
-        "internal_connections": internal_connections,
-        "book_connections": book_connections
-    })
-
-    return summary
+        return summary
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return f"Error generating chapter summary: {str(e)}"
 
 def rerank_with_llm(docs, query, llm, top_k=3):
     """Rerank retrieved documents using the LLM to identify most relevant ones."""

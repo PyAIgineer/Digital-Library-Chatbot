@@ -1,5 +1,5 @@
 # Build stage
-FROM python:3.10-slim AS builder
+FROM python:3.11-slim AS builder
 
 WORKDIR /app
 
@@ -23,7 +23,7 @@ RUN pip install --no-cache-dir -U pip setuptools wheel
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Runtime stage
-FROM python:3.10-slim
+FROM python:3.11-slim
 
 # Copy Python environment from builder
 COPY --from=builder /opt/venv /opt/venv
@@ -39,11 +39,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # Copy application code
-COPY . .
+COPY src/ /app/src/
+COPY start.sh /app/
 
 # Create necessary directories
-RUN mkdir -p /app/ebooks_library /app/processed_data /app/qdrant_db /app/uploads /app/static /app/models
-VOLUME ["/app/ebooks_library", "/app/processed_data", "/app/qdrant_db", "/app/uploads", "/app/models"]
+RUN mkdir -p /app/ebooks_library /app/processed_data /app/qdrant_db /app/uploads /app/src/static
+VOLUME ["/app/ebooks_library", "/app/processed_data", "/app/qdrant_db", "/app/uploads"]
 
 # Expose ports for API and UI
 EXPOSE 8000 7860
@@ -58,4 +59,4 @@ HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=40s \
   CMD curl -f http://localhost:8000/health || exit 1
 
 # Command to run the application
-CMD ["python", "main.py"]
+CMD ["python", "src/main.py"]

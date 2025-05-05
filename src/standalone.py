@@ -9,15 +9,29 @@ from urllib.parse import urljoin
 # Load environment variables
 load_dotenv()
 
-# Configuration - Use localhost instead of 0.0.0.0
-API_BASE_URL = os.environ.get("API_BASE_URL", "http://127.0.0.1:8000")
+# Determine API base URL based on environment
+if os.environ.get("RAILWAY_STATIC_URL"):
+    # If deployed on Railway, the API is at the same URL
+    # We're handling paths via FastAPI's routing
+    API_BASE_URL = ""  # Empty string for same-origin requests
+    print(f"Railway deployment detected. Using same-origin API requests.")
+else:
+    # For local development
+    API_BASE_URL = os.environ.get("API_BASE_URL", "http://127.0.0.1:8000")
+    print(f"Local development mode. API_BASE_URL: {API_BASE_URL}")
 
 # Print for debugging
 print(f"Connecting to backend at: {API_BASE_URL}")
 
 # Function to make API calls to FastAPI backend with improved error handling
 def api_call(endpoint, method="GET", data=None, files=None, max_retries=3, retry_delay=2):
-    url = urljoin(API_BASE_URL, endpoint)
+    # Handle both relative and absolute URLs
+    if API_BASE_URL:
+        # Normal case with a base URL
+        url = urljoin(API_BASE_URL, endpoint)
+    else:
+        # Railway case with same-origin requests (empty API_BASE_URL)
+        url = endpoint
     
     print(f"Making API call to: {url} (method: {method})")
     
@@ -280,13 +294,41 @@ with gr.Blocks(title="Book Chat") as demo:
     clear.click(lambda: [], None, chatbot)
     summary_btn.click(get_book_summary, inputs=book_selection, outputs=summary_output)
 
+# if __name__ == "__main__":
+#     import os
+#     port = int(os.environ.get("PORT", 7860))
+    
+#     # Print connection information for troubleshooting
+#     print(f"Gradio UI starting on port: {port}")
+#     print(f"Attempting to connect to backend API at: {API_BASE_URL}")
+    
+#     # Launch the UI with increased timeout
+#     demo.launch(server_name="127.0.0.1", server_port=port, debug=True)
+
 if __name__ == "__main__":
     import os
+    
+    # Use Railway's PORT environment variable or default to 7860
     port = int(os.environ.get("PORT", 7860))
     
-    # Print connection information for troubleshooting
-    print(f"Gradio UI starting on port: {port}")
-    print(f"Attempting to connect to backend API at: {API_BASE_URL}")
+    # Always bind to 0.0.0.0 for external access on Railway
+    server_name = "0.0.0.0"
     
-    # Launch the UI with increased timeout
-    demo.launch(server_name="127.0.0.1", server_port=port, debug=True)
+    # Disable debug mode in production (on Railway)
+    debug_mode = False if os.environ.get("RAILWAY_STATIC_URL") else True
+    
+    # Print connection information for troubleshooting
+    print(f"Gradio UI starting on {server_name}:{port}")
+    if API_BASE_URL:
+        print(f"Connecting to backend API at: {API_BASE_URL}")
+    else:
+        print("Using same-origin API requests")
+    
+    # Launch the UI
+    demo.launch(
+        server_name=server_name, 
+        server_port=port, 
+        debug=debug_mode,
+        show_error=True,
+        share=False
+    )

@@ -98,23 +98,22 @@ class EnhancedRetriever:
             top_k = self.top_k
         
         try:
+            # Check if filters is a dict or a filter object
             if filters:
-                # Convert filters to the format expected by the vector store
-                filter_dict = {"filter": {"must": []}}
-                
+                # For Qdrant, convert dictionary filters to the correct format
+                # Qdrant expects filters in a specific format, not just a plain dictionary
+                filter_dict = {}
                 for key, value in filters.items():
-                    filter_dict["filter"]["must"].append(
-                        {"key": key, "match": {"value": value}}
-                    )
+                    filter_dict[key] = {"$eq": value}
                 
-                # Perform similarity search with filters
+                # Perform search with filter
                 results = self.vector_db.similarity_search_with_score(
-                    query, k=top_k, **filter_dict
+                    query, k=top_k, filter=filter_dict
                 )
             else:
                 # Perform similarity search without filters
                 results = self.vector_db.similarity_search_with_score(
-                    query, k=top_k
+                    query, k=top_k,
                 )
             
             return results
@@ -165,7 +164,7 @@ class EnhancedRetriever:
             threshold: Minimum similarity score (uses default if None)
             
         Returns:
-            Filtered list of results above threshold
+                Filtered list of results above threshold
         """
         if threshold is None:
             threshold = self.min_relevance_score
@@ -175,14 +174,39 @@ class EnhancedRetriever:
             return results
         
         try:
-            # Compute query embedding
-            query_embedding = self.embedding_model.encode([query])[0]
+            # Compute query embedding - handle different types of embedding models
+            if hasattr(self.embedding_model, 'embed_query'):
+                # LangChain HuggingFaceEmbeddings
+                query_embedding = self.embedding_model.embed_query(query)
+            elif hasattr(self.embedding_model, 'encode'):
+                # SentenceTransformer
+                query_embedding = self.embedding_model.encode([query])[0]
+            else:
+                # Unknown embedding model type - return results without filtering
+                print("Unknown embedding model type, skipping relevance filtering")
+                return results
             
             filtered_results = []
             for result in results:
                 # Compute text embedding and similarity
-                text_embedding = self.embedding_model.encode([result["content"]])[0]
-                similarity = cosine_similarity([query_embedding], [text_embedding])[0][0]
+                text = result["content"] if "content" in result else result.get("page_content", "")
+                
+                if hasattr(self.embedding_model, 'embed_query'):
+                    # LangChain HuggingFaceEmbeddings
+                    text_embedding = self.embedding_model.embed_query(text)
+                elif hasattr(self.embedding_model, 'encode'):
+                    # SentenceTransformer
+                    text_embedding = self.embedding_model.encode([text])[0]
+                
+                # Calculate similarity
+                from sklearn.metrics.pairwise import cosine_similarity
+                import numpy as np
+                
+                # Convert to numpy arrays if needed
+                query_embedding_np = np.array(query_embedding).reshape(1, -1)
+                text_embedding_np = np.array(text_embedding).reshape(1, -1)
+                
+                similarity = cosine_similarity(query_embedding_np, text_embedding_np)[0][0]
                 
                 if similarity >= threshold:
                     result["similarity"] = float(similarity)
@@ -293,6 +317,46 @@ class EnhancedRetriever:
         
         return results_by_book
     
+    # Add this method to the EnhancedRetriever class in retrieval.py
+
+    def get_relevant_documents(self, query, metadata_filters=None, top_k=None):
+        """Get relevant documents based on the query."""
+        if top_k is None:
+            top_k = self.top_k
+            
+        try:
+            # If filters are provided, we need to handle them properly
+            if metadata_filters:
+                # Get all documents from the vector DB and filter manually
+                # This bypasses the filter compatibility issues
+                all_results = self.vector_db.similarity_search(query, k=top_k*3)
+                
+                # Filter results manually based on metadata
+                filtered_results = []
+                for doc in all_results:
+                    matches_all_filters = True
+                    for key, value in metadata_filters.items():
+                        if doc.metadata.get(key) != value:
+                            matches_all_filters = False
+                            break
+                    
+                    if matches_all_filters:
+                        filtered_results.append(doc)
+                        
+                        # Stop once we have enough results
+                        if len(filtered_results) >= top_k:
+                            break
+                            
+                return filtered_results[:top_k]
+            else:
+                # No filters, use standard search
+                return self.vector_db.similarity_search(query, k=top_k)
+                
+        except Exception as e:
+            print(f"Error in get_relevant_documents: {str(e)}")
+            # Return empty list on error to ensure graceful fallback
+            return []
+        
     def get_document_structure(self, book_title):
         """Get structural information about a document.
         

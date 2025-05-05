@@ -12,6 +12,10 @@ from pathlib import Path
 import tempfile
 import time
 from sentence_transformers import SentenceTransformer
+import subprocess
+import sys
+import asyncio
+import signal
 
 # Import our custom modules
 from llm_interface import (
@@ -29,17 +33,75 @@ from load_data import (
 from retrieval import EnhancedRetriever
 from vector_db import setup_vector_db, get_books_with_metadata, clear_vector_db
 
+from contextlib import asynccontextmanager
+
+# Add this context manager at the top of your main.py file
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Code that runs on startup
+    
+    print("Starting lifespan - initializing system components...")
+    
+    # Start the library watcher thread
+    start_library_watcher()
+    
+    # Auto-initialize the system if environment variables are set
+    if os.environ.get("GROQ_API_KEY"):
+        try:
+            print("Auto-initializing system...")
+            
+            # Initialize the system with environment variables
+            # Create a request object for initialization
+            request = InitializeRequest()
+            await initialize_system(request)
+            
+            print("System auto-initialized successfully")
+        except Exception as e:
+            print(f"Auto-initialization failed: {e}")
+    else:
+        print("No GROQ_API_KEY found in environment variables. Auto-initialization skipped.")
+    
+    # Add a longer delay to ensure the API server is fully started
+    print("API server starting up - waiting to ensure it's ready...")
+    await asyncio.sleep(5)
+    
+    # Start the UI process
+    print("Starting Gradio UI process...")
+    start_ui_process()
+    
+    # Yield control back to FastAPI
+    yield
+    
+    # Code that runs on shutdown
+    print("Shutting down API server...")
+    
+    # Terminate UI process if running
+    if global_state["ui_process"]:
+        print(f"Shutting down UI process (PID: {global_state['ui_process'].pid})")
+        try:
+            global_state["ui_process"].terminate()
+            global_state["ui_process"].wait(timeout=5)
+        except:
+            # Force kill if termination doesn't work
+            if sys.platform != "win32":  # Not supported on Windows
+                os.kill(global_state["ui_process"].pid, signal.SIGKILL)
+            else:
+                os.system(f"taskkill /F /PID {global_state['ui_process'].pid}")
+
+
+
 # Initialize FastAPI app
 app = FastAPI(
     title="Educational Content Analysis API",
     description="API for processing, analyzing, and retrieving educational content using LLMs",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan 
 )
 
-# Add CORS middleware
+# Add CORS middleware with specific origin for Gradio UI
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows all origins
+    allow_origins=["*"],  # In production, set this to specific origins
     allow_credentials=True,
     allow_methods=["*"],  # Allows all methods
     allow_headers=["*"],  # Allows all headers
@@ -69,7 +131,8 @@ global_state = {
         "is_processing": False,
         "processed_books": [],
         "current_book": None
-    }
+    },
+    "ui_process": None
 }
 
 # Thread lock for processing status
@@ -77,8 +140,8 @@ processing_lock = threading.Lock()
 
 # Pydantic models for API requests and responses
 class InitializeRequest(BaseModel):
-    groq_api_key: str
-    llm_model: str = "llama3-8b-8192"
+    groq_api_key: Optional[str] = None
+    llm_model: Optional[str] = "llama3-8b-8192"
 
 class QueryRequest(BaseModel):
     query: str
@@ -108,13 +171,55 @@ class InitResponse(BaseModel):
 # Dependency to check if system is initialized
 def get_initialized_state():
     if not global_state["is_initialized"]:
-        raise HTTPException(status_code=400, detail="System not initialized. Call /api/initialize first.")
+        # Check if we have the critical components
+        if (global_state["retriever"] is not None and 
+            global_state["llm"] is not None and
+            global_state["chatbot"] is not None):
+            print("System components are available but is_initialized flag not set. Setting it now.")
+            global_state["is_initialized"] = True
+        else:
+            raise HTTPException(status_code=400, detail="System not initialized. Call /api/initialize first.")
     return global_state
 
 # Initialize the system components
 @app.post("/api/initialize", response_model=InitResponse)
-async def initialize_system(request: InitializeRequest):
+async def initialize_system(request: InitializeRequest = None):
     try:
+        # Check if already initialized
+        if global_state["is_initialized"] and global_state["retriever"] is not None:
+            print("System already initialized, returning current state")
+            # Get available books
+            books = get_books_with_metadata(PROCESSED_DIR)
+            book_info_list = []
+            for book in books:
+                book_info_list.append(BookInfo(
+                    title=book["book_title"],
+                    author=book.get("author", "Unknown"),
+                    total_pages=book.get("total_pages", 0),
+                    file_hash=book.get("file_hash", "")
+                ))
+            
+            return InitResponse(
+                status="success",
+                message="System already initialized",
+                books=book_info_list
+            )
+            
+        # Use environment variables or default values if not provided in request
+        groq_api_key = os.environ.get("GROQ_API_KEY", "")
+        llm_model = os.environ.get("LLM_MODEL", "llama3-8b-8192")
+        
+        # If a request is provided with values, they override environment variables
+        if request:
+            if request.groq_api_key:
+                groq_api_key = request.groq_api_key
+            if request.llm_model:
+                llm_model = request.llm_model
+        
+        # Validate API key
+        if not groq_api_key:
+            raise ValueError("GROQ_API_KEY is required. Set it in the environment or provide it in the request.")
+        
         print("Setting up embeddings...")
         global_state["embedding_model"] = setup_embeddings()
         
@@ -131,7 +236,7 @@ async def initialize_system(request: InitializeRequest):
         print("Setting up PDF processor...")
         config = PDFProcessorConfig(
             embedding_model=global_state["embedding_model"],
-            library_dir=LIBRARY_DIR,     # Using the same dir as Flask version
+            library_dir=LIBRARY_DIR,
             processed_dir=PROCESSED_DIR,
             use_semantic_chunking=True
         )
@@ -145,15 +250,11 @@ async def initialize_system(request: InitializeRequest):
         )
         
         print("Setting up LLM...")
-        global_state["llm"] = setup_educational_llm(request.groq_api_key, request.llm_model)
-        
-        # Set up retrieval system wrapper for the chatbot
-        retrieval_system = {
-            "base_retriever": global_state["retriever"]
-        }
+        global_state["llm"] = setup_educational_llm(groq_api_key, llm_model)
         
         print("Building chatbot...")
-        global_state["chatbot"] = build_chatbot(retrieval_system, global_state["llm"])
+        # Pass the retriever directly
+        global_state["chatbot"] = build_chatbot(global_state["retriever"], global_state["llm"])
         
         # Get available books
         books = get_books_with_metadata(PROCESSED_DIR)
@@ -170,6 +271,7 @@ async def initialize_system(request: InitializeRequest):
             if book.get("filename") and book.get("filename") not in global_state["processing_status"]["processed_books"]:
                 global_state["processing_status"]["processed_books"].append(book.get("filename"))
         
+        # SET THE FLAG BEFORE RETURNING - this was missing in your version
         global_state["is_initialized"] = True
         
         print("System initialized successfully")
@@ -191,6 +293,27 @@ async def initialize_system(request: InitializeRequest):
             error_message = f"Initialization failed: {str(e)}"
             
         raise HTTPException(status_code=500, detail=error_message)
+    
+# Function to start the UI process
+def start_ui_process():
+    try:
+        ui_script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "standalone.py")
+        env = os.environ.copy()
+        env["API_BASE_URL"] = "http://127.0.0.1:8000"  
+        
+        # Start the UI process WITHOUT redirecting output to capture errors directly
+        print(f"Starting UI process from: {ui_script_path}")
+        global_state["ui_process"] = subprocess.Popen(
+            [sys.executable, ui_script_path],
+            env=env
+            # Removed stdout and stderr redirection to see all output
+        )
+        
+        print(f"UI process started with PID: {global_state['ui_process'].pid}")
+            
+    except Exception as e:
+        print(f"Error starting UI process: {e}")
+            
 
 # Upload a PDF file
 @app.post("/api/upload_pdf")
@@ -211,7 +334,7 @@ async def upload_pdf(
                 detail=f"Already processing a PDF: {global_state['processing_status']['current_book']}"
             )
             
-        # Save file to library directory (using same directory as Flask version)
+        # Save file to library directory (using same directory as the Flask version)
         file_path = os.path.join(LIBRARY_DIR, file.filename)
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
@@ -241,8 +364,10 @@ def process_pdf_in_background(file_path, pdf_processor, vector_db):
 
 # List all available books
 @app.get("/api/books")
-async def list_books(state: Dict = Depends(get_initialized_state)):
+async def list_books():
     try:
+        # Allow accessing books even if system is not yet initialized
+        # This is useful for the UI to check what books are available
         books = get_books_with_metadata(PROCESSED_DIR)
         return {"books": books}
     except Exception as e:
@@ -281,34 +406,58 @@ async def chat_with_content(request: QueryRequest, state: Dict = Depends(get_ini
         raise HTTPException(status_code=500, detail=f"Chat failed: {str(e)}")
 
 # Generate book or chapter summary
+# Update just the method implementation while keeping the function name and parameters the same
 @app.post("/api/summary")
 async def generate_summary(request: SummaryRequest, state: Dict = Depends(get_initialized_state)):
     try:
         # Check if book exists
-        if request.book_title not in [book["book_title"] for book in get_books_with_metadata(PROCESSED_DIR)]:
-            raise HTTPException(status_code=404, detail=f"Book not found: {request.book_title}")
+        books_metadata = get_books_with_metadata(PROCESSED_DIR)
+        exact_match = False
+        for book in books_metadata:
+            if book["book_title"] == request.book_title:
+                exact_match = True
+                break
+                
+        if not exact_match:
+            # Try more flexible matching
+            found = False
+            for book in books_metadata:
+                stored_title = book["book_title"].strip()
+                input_title = request.book_title.strip()
+                if (stored_title.lower() == input_title.lower() or
+                    stored_title.lower() in input_title.lower() or
+                    input_title.lower() in stored_title.lower()):
+                    # Use the correct book title from metadata
+                    request.book_title = book["book_title"]
+                    found = True
+                    break
+            
+            if not found:
+                raise HTTPException(status_code=404, detail=f"Book not found: {request.book_title}")
         
-        # Create retrieval system wrapper
-        retrieval_system = {
-            "base_retriever": state["retriever"]
-        }
+        # Get the retriever 
+        retriever = state["retriever"]
         
         # Generate appropriate summary
+        # Import our direct summary function
+        from llm_interface import generate_book_summary_direct
+        
         if request.chapter_header:
             # Chapter summary
             summary = generate_chapter_summary(
                 request.book_title,
                 request.chapter_header,
-                retrieval_system,
+                retriever,  # Pass retriever directly
                 state["llm"]
             )
             summary_type = "chapter"
         else:
-            # Book summary
-            summary = generate_book_summary(
+            # Use our direct access function instead
+            summary = generate_book_summary_direct(
                 request.book_title,
-                retrieval_system,
-                state["llm"]
+                retriever,  # Pass retriever for compatibility 
+                state["llm"],
+                processed_data_dir=PROCESSED_DIR
             )
             summary_type = "book"
         
@@ -321,6 +470,9 @@ async def generate_summary(request: SummaryRequest, state: Dict = Depends(get_in
     except HTTPException:
         raise
     except Exception as e:
+        print(f"Summary generation error: {str(e)}")
+        import traceback
+        traceback.print_exc()  # Print full traceback for debugging
         raise HTTPException(status_code=500, detail=f"Summary generation failed: {str(e)}")
 
 # Find connections between topics
@@ -367,7 +519,8 @@ async def get_reading_suggestions(request: QueryRequest, state: Dict = Depends(g
 
 # Get processing status
 @app.get("/api/status")
-async def get_processing_status(state: Dict = Depends(get_initialized_state)):
+async def get_processing_status():
+    # Allow checking status even if not initialized
     return global_state["processing_status"]
 
 # Reset system (clear vector database)
@@ -458,23 +611,111 @@ def start_library_watcher():
     watcher_thread.start()
     print("PDF processing watcher thread started successfully")
 
+# Function to monitor UI process output
+async def monitor_ui_process():
+    if global_state["ui_process"]:
+        # Non-blocking read from subprocess stdout and stderr
+        for line in iter(global_state["ui_process"].stdout.readline, b''):
+            if line:
+                print(f"UI> {line.decode('utf-8').strip()}")
+        
+        for line in iter(global_state["ui_process"].stderr.readline, b''):
+            if line:
+                print(f"UI Error> {line.decode('utf-8').strip()}")
+
+
+# Function to start the UI process
+def start_ui_process():
+    try:
+        ui_script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "standalone.py")
+        env = os.environ.copy()
+        # Make sure we use 127.0.0.1 consistently 
+        env["API_BASE_URL"] = "http://127.0.0.1:8000"
+        
+        # Start the UI process
+        print(f"Starting UI process from: {ui_script_path}")
+        global_state["ui_process"] = subprocess.Popen(
+            [sys.executable, ui_script_path],
+            env=env,
+            # Don't redirect output so we can see errors directly
+        )
+        
+        print(f"UI process started with PID: {global_state['ui_process'].pid}")
+        print(f"Access the Gradio UI at: http://127.0.0.1:7860")
+            
+    except Exception as e:
+        print(f"Error starting UI process: {e}")
+
+# Function to monitor UI process output
+async def monitor_ui_process():
+    if global_state["ui_process"]:
+        # Non-blocking read from subprocess stdout and stderr
+        for line in iter(global_state["ui_process"].stdout.readline, b''):
+            if line:
+                print(f"UI> {line.decode('utf-8').strip()}")
+        
+        for line in iter(global_state["ui_process"].stderr.readline, b''):
+            if line:
+                print(f"UI Error> {line.decode('utf-8').strip()}")
+
 # Serve static files
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-# Startup event to initialize the watcher
-@app.on_event("startup")
-async def startup_event():
-    # Start the library watcher thread when the application starts
-    start_library_watcher()
+# Startup event to initialize the watcher and UI
+# Add this near the imports section in main.py
+from dotenv import load_dotenv
+
+# Load environment variables at the beginning of the file
+load_dotenv()
+
+# startup_event function 
+# @app.on_event("startup")
+# async def startup_event():
+#     # Start the library watcher thread
+#     start_library_watcher()
+    
+#     # Auto-initialize the system if environment variables are set
+#     if os.environ.get("GROQ_API_KEY"):
+#         try:
+#             print("Auto-initializing system...")
+            
+#             # Initialize the system with environment variables
+#             await initialize_system()
+            
+#             print("System auto-initialized successfully")
+#         except Exception as e:
+#             print(f"Auto-initialization failed: {e}")
+#     else:
+#         print("No GROQ_API_KEY found in environment variables. Auto-initialization skipped.")
+    
+#     # Start the UI process
+#     start_ui_process()
+
+# # Shutdown event to clean up processes
+# @app.on_event("shutdown")
+# async def shutdown_event():
+#     # Terminate UI process if running
+#     if global_state["ui_process"]:
+#         print(f"Shutting down UI process (PID: {global_state['ui_process'].pid})")
+#         try:
+#             global_state["ui_process"].terminate()
+#             global_state["ui_process"].wait(timeout=5)
+#         except:
+#             # Force kill if termination doesn't work
+#             if sys.platform != "win32":  # Not supported on Windows
+#                 os.kill(global_state["ui_process"].pid, signal.SIGKILL)
+#             else:
+#                 os.system(f"taskkill /F /PID {global_state['ui_process'].pid}")
 
 # Add this function near your other API endpoints in main.py
 @app.get("/")
 async def root():
-    """Root endpoint that provides basic API information"""
+    """Root endpoint that provides basic API information and UI redirect info"""
     return {
         "app": "Educational Content Analysis API",
         "version": "1.0.0",
         "status": "running",
+        "ui_url": "http://localhost:7860",  # UI is running on this port
         "endpoints": {
             "api/initialize": "Initialize the system",
             "api/upload_pdf": "Upload a PDF file",
@@ -493,5 +734,6 @@ async def root():
 
 # Entry point for running the application
 if __name__ == "__main__":
-    # You can customize host and port here
-    uvicorn.run("main:app", host="0.0.0.0", port=7860, reload=True)
+     # Run without reload, and with clearer host binding
+    print("Starting FastAPI server on 127.0.0.1:8000...")
+    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=False, log_level="debug")

@@ -4,11 +4,20 @@ from langchain_groq import ChatGroq
 from langchain.chains import ConversationalRetrievalChain
 from langchain.memory import ConversationBufferMemory
 from langchain.prompts import PromptTemplate
+
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough, RunnableLambda
 
+from langchain_core.prompts import ChatPromptTemplate
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain.chains import create_retrieval_chain
+from langchain.chains.history_aware_retriever import create_history_aware_retriever
+
+from langchain_core.messages import HumanMessage, AIMessage
+
 from langchain.schema import BaseRetriever
 from langchain.schema.document import Document
+from langchain.schema.output_parser import StrOutputParser
 from pydantic import Field
 
 from retriever_utils import RerankedRetriever
@@ -117,11 +126,18 @@ class TopicConnectionFinder:
         return connections
 
 def build_chatbot(retrieval_system, llm, use_reranker=True):
-    """Build an enhanced RAG chatbot using the retrieval system with topic connections and optional reranking."""
+    """Build an enhanced RAG chatbot using the retrieval system with topic connections."""
+    
+    # Determine if we're receiving a direct retriever or a dictionary
+    if isinstance(retrieval_system, dict) and "base_retriever" in retrieval_system:
+        base_retriever = retrieval_system["base_retriever"]
+    else:
+        # Assume retrieval_system is the retriever itself
+        base_retriever = retrieval_system
     
     # Initialize the topic connection finder
-    connection_finder = TopicConnectionFinder(llm, retrieval_system["base_retriever"])
-    
+    connection_finder = TopicConnectionFinder(llm, base_retriever)
+
     # Create conversation memory
     memory = ConversationBufferMemory(
         memory_key="chat_history",
@@ -129,44 +145,30 @@ def build_chatbot(retrieval_system, llm, use_reranker=True):
         output_key="answer"
     )
     
-    # # Create a custom retriever that wraps the base retriever with reranking
-    # from langchain.schema import BaseRetriever
-    
-    # class RerankedRetriever(BaseRetriever):
-    #     """Custom retriever that wraps a base retriever with reranking capabilities."""
-        
-    #     def __init__(self, base_retriever, llm, use_reranker=True, top_k=5):
-    #         """Initialize with base retriever and reranking parameters."""
-    #         super().__init__()
-    #         self.base_retriever = base_retriever
-    #         self.llm = llm
-    #         self.use_reranker = use_reranker
-    #         self.top_k = top_k
-            
-    #     def get_relevant_documents(self, query):
-    #         """Get relevant documents after optional reranking."""
-    #         # Get initial docs
-    #         docs = self.base_retriever.get_relevant_documents(query)
-            
-    #         # Apply reranking if enabled
-    #         if self.use_reranker and docs:
-    #             from llm_interface import rerank_with_llm
-    #             docs = rerank_with_llm(docs, query, self.llm, self.top_k)
-                
-    #         return docs
-
     # Create our enhanced retriever
     enhanced_retriever = RerankedRetriever(
-        retrieval_system["base_retriever"], 
-        llm, 
+        base_retriever=base_retriever, 
+        llm=llm, 
         use_reranker=use_reranker
     )
     
-    # Enhanced prompt that integrates connections
-    qa_prompt = PromptTemplate(
-        input_variables=["context", "connections", "question", "chat_history"],
-        template="""You are an educational assistant specializing in textbooks and curriculum materials.
-        Use the following pieces of context and identified connections to answer the question at the end.
+    # Define a prompt template for extracting connections
+    connection_prompt = PromptTemplate.from_template(
+        """Analyze the following content and identify meaningful connections between topics:
+        
+        CONTENT:
+        {context}
+        
+        QUESTION:
+        {question}
+        
+        Identify key topics and their relationships:"""
+    )
+    
+    # Define the main QA prompt
+    qa_prompt = PromptTemplate.from_template(
+        """You are an educational assistant specializing in textbooks and curriculum materials.
+        Use the following context and connections to answer the question.
         
         CONTEXT:
         {context}
@@ -188,8 +190,50 @@ def build_chatbot(retrieval_system, llm, use_reranker=True):
         
         COMPREHENSIVE ANSWER:"""
     )
-
-
+    
+    # Create a custom function for handling the conversation
+    def process_query(query_dict):
+        question = query_dict.get("question", "")
+        chat_history = query_dict.get("chat_history", [])
+        
+        # Get relevant documents
+        docs = enhanced_retriever.invoke(question)
+        
+        # Extract document content
+        context = "\n\n".join([doc.page_content for doc in docs])
+        
+        # Find connections using connection finder
+        connections = connection_finder.find_connections(question, docs)
+        
+        # Format chat history if present
+        formatted_history = ""
+        if chat_history:
+            history_items = []
+            for exchange in chat_history:
+                if isinstance(exchange, tuple) and len(exchange) == 2:
+                    history_items.append(f"Human: {exchange[0]}\nAssistant: {exchange[1]}")
+                elif hasattr(exchange, "content"):
+                    history_items.append(f"{exchange.type}: {exchange.content}")
+            formatted_history = "\n".join(history_items)
+        
+        # Create input for the prompt
+        prompt_input = {
+            "context": context,
+            "connections": connections,
+            "chat_history": formatted_history,
+            "question": question
+        }
+        
+        # Generate the answer
+        answer = llm.invoke(qa_prompt.format(**prompt_input))
+        
+        # Return the result in the expected format
+        return {
+            "answer": answer.content if hasattr(answer, "content") else str(answer),
+            "source_documents": docs
+        }
+    
+    return process_query
     
     # Create a function to analyze connections before answering
     def analyze_connections(inputs):
@@ -257,14 +301,11 @@ def answer_with_citations(response):
 def get_chat_response(chatbot, question):
     """Get a response from the chatbot for a question with topic connections."""
     try:
+        # Note: chatbot is now a function, not a chain object
         response = chatbot({"question": question})
         return answer_with_citations(response)
     except Exception as e:
         return f"Error generating response: {str(e)}. Please try again with a different question."
-    
-"""
-Functions to add to llm_interface.py for format integration.
-"""
 
 from response_format import get_formatter, extract_format_request
 
@@ -275,7 +316,7 @@ def get_chat_response_with_format(chatbot, question, llm=None):
     Enhanced version of get_chat_response that supports formatting.
     
     Args:
-        chatbot: The chatbot instance
+        chatbot: The chatbot function
         question: User's question
         llm: LLM instance to use for formatting (optional)
         
@@ -289,7 +330,7 @@ def get_chat_response_with_format(chatbot, question, llm=None):
     query_to_use = cleaned_question if format_type else question
     
     try:
-        # Get regular response
+        # Get regular response - note chatbot is now a function
         response = chatbot({"question": query_to_use})
         
         # Apply formatting if requested
@@ -316,6 +357,136 @@ def get_chat_response_with_format(chatbot, question, llm=None):
             return answer_with_citations(response)
     except Exception as e:
         return f"Error generating response: {str(e)}. Please try again with a different question."
+
+
+
+# Add this function to your llm_interface.py file
+def generate_book_summary_direct(book_title, retrieval_system, llm, processed_data_dir="./processed_data"):
+    """Generate a book summary by directly reading processed data files."""
+    print(f"Generating summary for book: {book_title}")
+    try:
+        # Find book data in processed directory
+        book_data = None
+        book_hash = None
+        
+        # Debug: Log available directories
+        if os.path.exists(processed_data_dir):
+            print(f"Processing directory exists. Contents: {os.listdir(processed_data_dir)}")
+        else:
+            print(f"WARNING: Processing directory '{processed_data_dir}' does not exist")
+            return f"Processing directory not found. Please check your configuration."
+        
+        # Loop through all directories in processed_data
+        for file_hash in os.listdir(processed_data_dir):
+            metadata_path = os.path.join(processed_data_dir, file_hash, "metadata.json")
+            if os.path.exists(metadata_path):
+                try:
+                    with open(metadata_path, "r") as f:
+                        metadata = json.load(f)
+                        print(f"Found metadata for book: {metadata.get('book_title')}")
+                        if metadata.get("book_title") == book_title:
+                            book_data = metadata
+                            book_hash = file_hash
+                            print(f"MATCHED book: {book_title}, hash: {book_hash}")
+                            break
+                except Exception as e:
+                    print(f"Error reading metadata file {metadata_path}: {str(e)}")
+        
+        if not book_data:
+            # Try a more flexible matching approach
+            for file_hash in os.listdir(processed_data_dir):
+                metadata_path = os.path.join(processed_data_dir, file_hash, "metadata.json")
+                if os.path.exists(metadata_path):
+                    try:
+                        with open(metadata_path, "r") as f:
+                            metadata = json.load(f)
+                            stored_title = metadata.get("book_title", "").strip()
+                            input_title = book_title.strip()
+                            
+                            # More flexible matching
+                            if (stored_title.lower() == input_title.lower() or
+                                stored_title.lower() in input_title.lower() or
+                                input_title.lower() in stored_title.lower()):
+                                book_data = metadata
+                                book_hash = file_hash
+                                print(f"Matched book with flexible matching: {stored_title}")
+                                break
+                    except Exception as e:
+                        print(f"Error in flexible matching: {str(e)}")
+            
+            if not book_data:
+                return f"No content found for book '{book_title}'. Please check the book title."
+        
+        # Load chunks
+        chunks_path = os.path.join(processed_data_dir, book_hash, "chunks.json")
+        if not os.path.exists(chunks_path):
+            return f"No chunks found for book '{book_title}'."
+        
+        with open(chunks_path, "r") as f:
+            chunks_data = json.load(f)
+        
+        if not chunks_data:
+            return f"Empty chunks for book '{book_title}'."
+        
+        print(f"Loaded {len(chunks_data)} chunks for book '{book_title}'")
+        
+        # Extract content from chunks
+        contents = []
+        for chunk in chunks_data:
+            if isinstance(chunk, dict) and "page_content" in chunk:
+                contents.append(chunk["page_content"])
+        
+        if not contents:
+            # Try alternative field names if page_content isn't found
+            for chunk in chunks_data:
+                if isinstance(chunk, dict):
+                    if "content" in chunk:
+                        contents.append(chunk["content"])
+                    elif "text" in chunk:
+                        contents.append(chunk["text"])
+        
+        if not contents:
+            return f"Could not extract content from chunks for book '{book_title}'."
+        
+        # Limit content to avoid token limits
+        book_content = "\n\n".join(contents[:20])  # Take first 20 chunks
+        
+        # Create summarization prompt
+        summary_prompt = PromptTemplate(
+            input_variables=["book_title", "book_content"],
+            template="""You are an expert educational book summarizer specialized in creating comprehensive and insightful summaries.
+            
+            Create a detailed summary of the book "{book_title}" based on the following extracted content.
+            
+            BOOK CONTENT:
+            {book_content}
+            
+            Provide a comprehensive book summary with the following structure:
+            1. Overview - What the book covers and its educational purpose
+            2. Main Themes - The primary themes and concepts explored
+            3. Chapter Breakdown - Brief overview of each chapter/section and its significance
+            4. Key Takeaways - The most important lessons and knowledge from this book
+            
+            COMPREHENSIVE BOOK SUMMARY:"""
+        )
+
+        # Create a summarization chain
+        summary_chain = (
+            summary_prompt 
+            | llm 
+            | StrOutputParser()
+        )
+
+        # Generate summary
+        summary = summary_chain.invoke({
+            "book_title": book_title,
+            "book_content": book_content
+        })
+
+        return summary
+    except Exception as e:
+        traceback.print_exc()
+        return f"Error generating summary: {str(e)}"
 
 def generate_book_summary_with_format(book_title, retrieval_system, llm, format_type=None, format_options=None):
     """
@@ -369,111 +540,193 @@ def generate_chapter_summary_with_format(book_title, chapter_header, retrieval_s
     
     return summary
 
-def generate_book_summary(book_title, retrieval_system, llm):
-    """Generate a comprehensive summary of an entire book."""
-    
-    # Create a specialized retriever for this book
-    retriever = retrieval_system["base_retriever"]
-    
-    # Use a query that encourages comprehensive book understanding
-    # First, get the main book structure
-    structure_query = f"Table of contents and chapter overview of {book_title}"
-    structure_docs = retriever.get_relevant_documents(
-        structure_query, 
-        metadata_filters={"book_title": book_title}
-    )
-    
-    # Then get key concepts from throughout the book
-    concept_query = f"Key concepts, main ideas, themes, and major topics in {book_title}"
-    concept_docs = retriever.get_relevant_documents(
-        concept_query,
-        metadata_filters={"book_title": book_title} 
-    )
-    
-    # Combine all documents
-    all_docs = structure_docs + concept_docs
-    
-    if not all_docs:
-        return f"No content found for book '{book_title}'."
-    
-    # Extract content and deduplicate
-    seen_content = set()
-    unique_contents = []
-    
-    for doc in all_docs:
-        # Create a simple hash of content to deduplicate
-        content_hash = hash(doc.page_content[:100])
-        if content_hash not in seen_content:
-            seen_content.add(content_hash)
-            unique_contents.append(doc.page_content)
-    
-    book_content = "\n\n".join(unique_contents)
-    
-    # Initialize connection finder to analyze book topics
-    connection_finder = TopicConnectionFinder(llm, retriever)
-    topic_connections = connection_finder.find_connections(
-        f"Major themes and concept relationships in {book_title}", 
-        all_docs
-    )
-    
-    # Create summarization prompt that integrates connections
-    summary_prompt = PromptTemplate(
-        input_variables=["book_title", "book_content", "topic_connections"],
-        template="""You are an expert educational book summarizer specialized in creating comprehensive and insightful summaries.
-        
-        Create a detailed summary of the book "{book_title}" based on the following extracted content and topic connections.
-        
-        BOOK CONTENT:
-        {book_content}
-        
-        TOPIC CONNECTIONS AND RELATIONSHIPS:
-        {topic_connections}
-        
-        Provide a comprehensive book summary with the following structure:
-        1. Overview - What the book covers and its educational purpose
-        2. Main Themes - The primary themes and concepts explored
-        3. Chapter Breakdown - Brief overview of each chapter/section and its significance
-        4. Conceptual Framework - How concepts interconnect and build on each other
-        5. Key Takeaways - The most important lessons and knowledge from this book
-        
-        COMPREHENSIVE BOOK SUMMARY:"""
-    )
 
-    # Create a summarization chain
-    summary_chain = (
-        summary_prompt 
-        | llm 
-        | StrOutputParser()
-    )
+import json
+from langchain.schema.output_parser import StrOutputParser
 
-    # Generate summary
-    summary = summary_chain.invoke({
-        "book_title": book_title,
-        "book_content": book_content,
-        "topic_connections": topic_connections
-    })
+from langchain.schema.document import Document
+import traceback
 
-    return summary
+def generate_book_summary(book_title, retrieval_system, llm, processed_data_dir="./processed_data"):
+    """Generate a book summary by directly reading processed data files."""
+    print(f"Generating summary for book: {book_title}")
+    try:
+        # Find book data in processed directory
+        book_data = None
+        book_hash = None
+        
+        # Debug: Log available directories
+        if os.path.exists(processed_data_dir):
+            print(f"Processing directory exists. Contents: {os.listdir(processed_data_dir)}")
+        else:
+            print(f"WARNING: Processing directory '{processed_data_dir}' does not exist")
+            return f"Processing directory not found. Please check your configuration."
+        
+        # Loop through all directories in processed_data
+        for file_hash in os.listdir(processed_data_dir):
+            metadata_path = os.path.join(processed_data_dir, file_hash, "metadata.json")
+            if os.path.exists(metadata_path):
+                try:
+                    with open(metadata_path, "r") as f:
+                        metadata = json.load(f)
+                        print(f"Found metadata for book: {metadata.get('book_title')}")
+                        if metadata.get("book_title") == book_title:
+                            book_data = metadata
+                            book_hash = file_hash
+                            print(f"MATCHED book: {book_title}, hash: {book_hash}")
+                            break
+                except Exception as e:
+                    print(f"Error reading metadata file {metadata_path}: {str(e)}")
+        
+        if not book_data:
+            # Try a more flexible matching approach
+            for file_hash in os.listdir(processed_data_dir):
+                metadata_path = os.path.join(processed_data_dir, file_hash, "metadata.json")
+                if os.path.exists(metadata_path):
+                    try:
+                        with open(metadata_path, "r") as f:
+                            metadata = json.load(f)
+                            stored_title = metadata.get("book_title", "").strip()
+                            input_title = book_title.strip()
+                            
+                            # More flexible matching
+                            if (stored_title.lower() == input_title.lower() or
+                                stored_title.lower() in input_title.lower() or
+                                input_title.lower() in stored_title.lower()):
+                                book_data = metadata
+                                book_hash = file_hash
+                                print(f"Matched book with flexible matching: {stored_title}")
+                                break
+                    except Exception as e:
+                        print(f"Error in flexible matching: {str(e)}")
+            
+            if not book_data:
+                return f"No content found for book '{book_title}'. Please check the book title."
+        
+        # Load chunks
+        chunks_path = os.path.join(processed_data_dir, book_hash, "chunks.json")
+        if not os.path.exists(chunks_path):
+            return f"No chunks found for book '{book_title}'."
+        
+        with open(chunks_path, "r") as f:
+            chunks_data = json.load(f)
+        
+        if not chunks_data:
+            return f"Empty chunks for book '{book_title}'."
+        
+        print(f"Loaded {len(chunks_data)} chunks for book '{book_title}'")
+        
+        # Extract content from chunks
+        contents = []
+        for chunk in chunks_data:
+            if isinstance(chunk, dict) and "page_content" in chunk:
+                contents.append(chunk["page_content"])
+        
+        if not contents:
+            # Try alternative field names if page_content isn't found
+            for chunk in chunks_data:
+                if isinstance(chunk, dict):
+                    if "content" in chunk:
+                        contents.append(chunk["content"])
+                    elif "text" in chunk:
+                        contents.append(chunk["text"])
+        
+        if not contents:
+            return f"Could not extract content from chunks for book '{book_title}'."
+        
+        # Limit content to avoid token limits
+        book_content = "\n\n".join(contents[:20])  # Take first 20 chunks
+        
+        # Create summarization prompt
+        summary_prompt = PromptTemplate(
+            input_variables=["book_title", "book_content"],
+            template="""You are an expert educational book summarizer specialized in creating comprehensive and insightful summaries.
+            
+            Create a detailed summary of the book "{book_title}" based on the following extracted content.
+            
+            BOOK CONTENT:
+            {book_content}
+            
+            Provide a comprehensive book summary with the following structure:
+            1. Overview - What the book covers and its educational purpose
+            2. Main Themes - The primary themes and concepts explored
+            3. Chapter Breakdown - Brief overview of each chapter/section and its significance
+            4. Key Takeaways - The most important lessons and knowledge from this book
+            
+            COMPREHENSIVE BOOK SUMMARY:"""
+        )
+
+        # Create a summarization chain
+        summary_chain = (
+            summary_prompt 
+            | llm 
+            | StrOutputParser()
+        )
+
+        # Generate summary
+        summary = summary_chain.invoke({
+            "book_title": book_title,
+            "book_content": book_content
+        })
+
+        return summary
+    except Exception as e:
+        traceback.print_exc()
+        return f"Error generating summary: {str(e)}"
 
 def generate_chapter_summary(book_title, chapter_header, retrieval_system, llm):
     """Generate a comprehensive summary of a specific chapter with topic connections."""
     
-    # Specialized retriever for this chapter
-    retriever = retrieval_system["base_retriever"]
+    # The retriever should be passed directly, no need to extract it
+    retriever = retrieval_system
     
-    # Retrieve content from the specific chapter with metadata filters
-    chapter_docs = retriever.get_relevant_documents(
+    # Create a function to search for content with manual filtering
+    def search_chapter_content(query, book_title, chapter_header=None, max_results=10):
+        try:
+            # Get raw results from vector DB
+            raw_results = retriever.semantic_search(query, top_k=max_results*2)
+            
+            # Filter results manually to only include this book and chapter
+            filtered_results = []
+            for result in raw_results:
+                # Check if it's the right book
+                if result.get("book_title") != book_title:
+                    continue
+                    
+                # If chapter header provided, check if it matches
+                if chapter_header and result.get("header") != chapter_header:
+                    continue
+                
+                # Convert to Document object if needed
+                if not isinstance(result, Document):
+                    doc = Document(
+                        page_content=result.get("content", ""),
+                        metadata=result.get("metadata", {})
+                    )
+                    filtered_results.append(doc)
+                else:
+                    filtered_results.append(result)
+                    
+                # Limit results
+                if len(filtered_results) >= max_results:
+                    break
+            
+            return filtered_results
+        except Exception as e:
+            print(f"Error in chapter content search: {str(e)}")
+            return []  # Return empty list on error
+    
+    # Retrieve content from the specific chapter
+    chapter_docs = search_chapter_content(
         f"Complete content and concepts from {chapter_header}",
-        metadata_filters={
-            "book_title": book_title,
-            "current_header": chapter_header
-        }
+        book_title,
+        chapter_header
     )
     
     # Also retrieve some book-level context to place this chapter in perspective
-    book_context_docs = retriever.get_relevant_documents(
+    book_context_docs = search_chapter_content(
         f"Where does the chapter '{chapter_header}' fit in the overall structure of {book_title}",
-        metadata_filters={"book_title": book_title}
+        book_title
     )
     
     # Combine all docs
@@ -483,9 +736,11 @@ def generate_chapter_summary(book_title, chapter_header, retrieval_system, llm):
         return f"No content found for chapter '{chapter_header}' in book '{book_title}'."
     
     # Extract content
-    chapter_content = "\n\n".join([doc.page_content for doc in chapter_docs])
+    chapter_content = "\n\n".join([doc.page_content for doc in chapter_docs 
+                                 if hasattr(doc, 'page_content')])
     
     # Find internal topic connections within the chapter
+    from llm_interface import TopicConnectionFinder
     connection_finder = TopicConnectionFinder(llm, retriever)
     internal_connections = connection_finder.find_connections(
         f"How do concepts connect within chapter '{chapter_header}'", 

@@ -3,6 +3,7 @@ langchain-community
 langchain-core
 langchain-groq
 langchain-qdrant
+langchain_huggingface
 qdrant-client
 pymupdf
 sentence-transformers

@@ -1,22 +1,42 @@
 version: '3.8'
 
 services:
-  educational-rag:
+  educational-app:
     build: .
-    container_name: educational-rag
+    container_name: educational-app
     ports:
-      - "8000:8000"
+      - "8000:8000"  # FastAPI backend
+      - "7860:7860"  # Gradio UI
     volumes:
       - ./ebooks_library:/app/ebooks_library
       - ./processed_data:/app/processed_data
       - ./qdrant_db:/app/qdrant_db
+      - ./uploads:/app/uploads
       - ./models:/app/models
+    env_file:
+      - .env
     environment:
-      - GROQ_API_KEY=${GROQ_API_KEY}
-      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
-      - TENANT_ID=${TENANT_ID}
-      - CLIENT_ID=${CLIENT_ID}
-      - CLIENT_SECRET=${CLIENT_SECRET}
+      - API_BASE_URL=http://localhost:8000
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # Optional: Add a watchtower service for automatically updating containers
+  watchtower:
+    image: containrrr/watchtower
+    container_name: watchtower
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: --interval 30 --cleanup
     restart: unless-stopped
 
-    
+volumes:
+  ebooks_library:
+  processed_data:
+  qdrant_db:
+  uploads:
+  models:

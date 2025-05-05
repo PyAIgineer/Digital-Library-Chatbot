@@ -1,6 +1,12 @@
 # Git
 .git
 .gitignore
+.github
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
 
 # Python
 __pycache__/
@@ -27,26 +33,23 @@ var/
 # Virtual Environment
 venv/
 ENV/
-.env
 
-# Data directories (mounted as volumes)
+# Data directories - will be mounted as volumes
 ebooks_library/
 processed_data/
 qdrant_db/
 uploads/
 models/
 
-# IDE files
+# IDE
 .idea/
 .vscode/
 *.swp
 *.swo
 
-# OS generated files
+# OS specific
 .DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
 Thumbs.db
+
+# Logs
+*.log

@@ -20,8 +20,3 @@ torch
 aiofiles
 msal
 markdown
-<<<<<<< HEAD
-# python 3.11
-=======
-# python 3.11
->>>>>>> 0619803c2858dd124cf8a7e2b09047ccf102baeb
